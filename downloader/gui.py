@@ -7,6 +7,7 @@ from tkinter import ttk
 
 from selenium.common.exceptions import WebDriverException
 
+from .browsers import BrowserNotFoundError
 from .exporter import ScribdExporter
 from .paths import get_downloads_dir
 
@@ -83,6 +84,9 @@ class App(tk.Tk):
                 progress=lambda done, total: self.events.put(("progress", done, total)),
             )
             self.events.put(("done", path))
+        except BrowserNotFoundError as error:
+            # Keep the full message: it lists where to download a browser.
+            self.events.put(("error", str(error)))
         except (ValueError, RuntimeError, WebDriverException) as error:
             self.events.put(("error", str(error).splitlines()[0]))
 

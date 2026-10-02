@@ -1,4 +1,5 @@
-"""Drive headless Chrome to export a Scribd document as a PDF, page by page."""
+"""Drive a headless browser (Chrome, Edge or Firefox) to export a Scribd document
+as a PDF, page by page."""
 
 import base64
 import os
@@ -7,14 +8,14 @@ import time
 from io import BytesIO
 
 from pypdf import PdfReader, PdfWriter
-from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.print_page_options import PrintOptions
 
-from . import paths, scripts
+from . import browsers, paths, scripts
 from .config import Config
 
 CSS_PX_PER_INCH = 96.0
+CM_PER_INCH = 2.54
 
 
 class ScribdExporter:
@@ -43,9 +44,11 @@ class ScribdExporter:
         self.log(f"Link embed: {embed}")
         self.log(f"Output file: {output}")
 
-        with tempfile.TemporaryDirectory(prefix="scribd-chrome-profile-") as profile:
-            self.log("Starting Chrome browser...")
-            driver = webdriver.Chrome(options=self._chrome_options(profile))
+        browser = browsers.select_browser(self.config.browser)
+
+        with tempfile.TemporaryDirectory(prefix="scribd-browser-profile-") as profile:
+            self.log(f"Starting {browser.label}...")
+            driver = browsers.create_driver(browser, profile, self.config.headless)
             try:
                 self._open_document(driver, embed)
                 self._export_pages(driver, output, progress)
@@ -57,28 +60,6 @@ class ScribdExporter:
         return output
 
     # ---------------------------------------------------------------- browser
-
-    def _chrome_options(self, profile_dir):
-        options = Options()
-        if self.config.headless:
-            options.add_argument("--headless=new")
-
-        for argument in (
-            "--window-size=1600,2200",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--remote-debugging-port=0",
-            f"--user-data-dir={profile_dir}",
-            "--disable-blink-features=AutomationControlled",
-            "--force-color-profile=srgb",
-            "--hide-scrollbars",
-        ):
-            options.add_argument(argument)
-
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        return options
 
     @staticmethod
     def _set_command_timeout(driver, seconds):
@@ -124,7 +105,6 @@ class ScribdExporter:
             raise RuntimeError("No .outer_page elements found.")
 
         self.log(f"Exporting {total} pages in batches of {batch_size}...")
-        driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"media": "print"})
 
         with tempfile.TemporaryDirectory(prefix="scribd-pdf-pages-") as spool:
             page_files = []
@@ -178,11 +158,13 @@ class ScribdExporter:
     @staticmethod
     def _release_pages(driver, page_numbers):
         driver.execute_script(scripts.RELEASE_PAGES, list(page_numbers))
-        # Best effort: ask Chrome to reclaim memory between batches.
-        try:
-            driver.execute_cdp_cmd("HeapProfiler.collectGarbage", {})
-        except WebDriverException:
-            pass
+        # Chromium only, best effort: ask the browser to reclaim memory.
+        collect = getattr(driver, "execute_cdp_cmd", None)
+        if collect:
+            try:
+                collect("HeapProfiler.collectGarbage", {})
+            except WebDriverException:
+                pass
 
     def _render_page(self, driver, index, total):
         """Print one page to PDF bytes, or return None if it must be skipped."""
@@ -205,25 +187,18 @@ class ScribdExporter:
             f'-> {width_in:.3f}"x{height_in:.3f}"'
         )
 
-        result = driver.execute_cdp_cmd(
-            "Page.printToPDF",
-            {
-                "landscape": False,
-                "displayHeaderFooter": False,
-                "printBackground": True,
-                "scale": 1,
-                "paperWidth": width_in,
-                "paperHeight": height_in,
-                "marginTop": 0,
-                "marginBottom": 0,
-                "marginLeft": 0,
-                "marginRight": 0,
-                "preferCSSPageSize": True,
-                "pageRanges": "1",
-                "transferMode": "ReturnAsBase64",
-            },
-        )
-        pdf_bytes = base64.b64decode(result["data"])
+        # WebDriver's standard print command: same call on Chrome, Edge and Firefox.
+        options = PrintOptions()
+        options.background = True
+        options.scale = 1
+        options.shrink_to_fit = False
+        options.page_width = width_in * CM_PER_INCH
+        options.page_height = height_in * CM_PER_INCH
+        options.margin_top = options.margin_bottom = 0
+        options.margin_left = options.margin_right = 0
+        options.page_ranges = ["1"]
+
+        pdf_bytes = base64.b64decode(driver.print_page(options))
 
         sheets = len(PdfReader(BytesIO(pdf_bytes)).pages)
         if sheets != 1:
