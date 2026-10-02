@@ -1,0 +1,9 @@
+[project]
+name = "scribderemover"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "pypdf>=6.19.0",
+    "ruff>=0.16.10",
+    "selenium>=4.50.0",
+]
